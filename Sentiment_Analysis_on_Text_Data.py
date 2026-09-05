@@ -24,6 +24,13 @@ try:
 except ImportError:
     docx = None
 
+try:
+    import openpyxl
+    from openpyxl.drawing.image import Image as OpenpyxlImage
+except ImportError:
+    openpyxl = None
+    OpenpyxlImage = None
+
 # Ensure NLTK lexicon is present
 try:
     nltk.data.find("sentiment/vader_lexicon.zip")
@@ -68,7 +75,7 @@ class SentimentApp(tk.Tk):
         self.btn_bench = ttk.Button(control_frame, text="🧪 Run Benchmark Dataset", command=self.run_benchmark)
         self.btn_bench.pack(side="left", padx=4)
 
-        self.btn_export = ttk.Button(control_frame, text="💾 Export Results (CSV)", command=self.export_csv)
+        self.btn_export = ttk.Button(control_frame, text="💾 Export Report (PDF / CSV / Excel)", command=self.export_report_flow)
         self.btn_export.pack(side="left", padx=4)
 
         ttk.Separator(control_frame, orient="vertical").pack(side="left", fill="y", padx=10)
@@ -190,7 +197,7 @@ class SentimentApp(tk.Tk):
         self.update_ui()
         self._set_busy_state(False)
 
-    # --- FILE PARSING ---
+    # --- FILE PARSING & DISPATCH ---
     def load_file(self):
         file_path = filedialog.askopenfilename(
             filetypes=[
@@ -204,6 +211,12 @@ class SentimentApp(tk.Tk):
         if not file_path:
             return
 
+        # Insert chosen file path into Live Input without triggering processing immediately
+        self.live_entry.delete(0, tk.END)
+        self.live_entry.insert(0, file_path)
+        self.status_lbl.config(text="File loaded. Click 'Analyze' to process.")
+
+    def _process_file_path(self, file_path: str):
         def file_reader_task():
             ext = os.path.splitext(file_path)[1].lower()
             lines = []
@@ -226,6 +239,7 @@ class SentimentApp(tk.Tk):
                 elif ext == ".pdf":
                     if not PdfReader:
                         self.after(0, lambda: messagebox.showerror("Missing Library", "Run: pip install pypdf"))
+                        self.after(0, self._set_busy_state, False)
                         return
                     reader = PdfReader(file_path)
                     for page in reader.pages:
@@ -236,6 +250,7 @@ class SentimentApp(tk.Tk):
                 elif ext == ".docx":
                     if not docx:
                         self.after(0, lambda: messagebox.showerror("Missing Library", "Run: pip install python-docx"))
+                        self.after(0, self._set_busy_state, False)
                         return
                     doc = docx.Document(file_path)
                     lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
@@ -259,6 +274,13 @@ class SentimentApp(tk.Tk):
         if not text or self.is_processing:
             return
 
+        cleaned_path = text.strip("'\"")
+        # Check if the entered string is an existing file path
+        if os.path.isfile(cleaned_path):
+            self._process_file_path(cleaned_path)
+            return
+
+        # Otherwise, process single text entry
         s = sia.polarity_scores(text)
         c = s["compound"]
         sent = "POSITIVE" if c >= 0.05 else ("NEGATIVE" if c <= -0.05 else "NEUTRAL")
@@ -291,14 +313,69 @@ class SentimentApp(tk.Tk):
         ]
         self._threaded_process(samples * 100)
 
-    def export_csv(self):
+    # --- ADVANCED EXPORT SYSTEM (PDF, CSV, EXCEL WITH CHARTS, IMAGE) ---
+    def export_report_flow(self):
         if self.results_df.empty:
             messagebox.showwarning("Warning", "No data available to export!")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV File", "*.csv")])
-        if path:
-            self.results_df.to_csv(path, index=False)
-            messagebox.showinfo("Success", f"Data exported successfully:\n{path}")
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save Sentiment Report",
+            defaultextension=".pdf",
+            filetypes=[
+                ("PDF Analytics Report (*.pdf)", "*.pdf"),
+                ("CSV Data File (*.csv)", "*.csv"),
+                ("Excel Workbook with Charts (*.xlsx)", "*.xlsx"),
+                ("High-Res Chart Image (*.png)", "*.png"),
+            ]
+        )
+        if not file_path:
+            return
+
+        ext = os.path.splitext(file_path)[1].lower()
+
+        try:
+            if ext == ".csv":
+                self.results_df.to_csv(file_path, index=False)
+                messagebox.showinfo("Export Successful", f"Data rows saved successfully to CSV:\n{file_path}")
+
+            elif ext == ".pdf":
+                # Save visual dashboard directly as a multi-chart PDF
+                self.fig.savefig(file_path, format="pdf", bbox_inches="tight")
+                messagebox.showinfo("Export Successful", f"Visual analytics report exported as PDF:\n{file_path}")
+
+            elif ext == ".png":
+                # High-res chart PNG
+                self.fig.savefig(file_path, dpi=300, bbox_inches="tight")
+                messagebox.showinfo("Export Successful", f"High-resolution chart saved as PNG:\n{file_path}")
+
+            elif ext == ".xlsx":
+                if openpyxl is None:
+                    messagebox.showerror(
+                        "Library Missing",
+                        "openpyxl is required to embed charts into Excel.\nInstall it using:\npip install openpyxl"
+                    )
+                    return
+
+                temp_chart_path = os.path.join(os.path.dirname(file_path), "_temp_chart_export.png")
+                self.fig.savefig(temp_chart_path, dpi=180, bbox_inches="tight")
+
+                with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+                    self.results_df.to_excel(writer, sheet_name="Sentiment Data", index=False)
+                    ws = writer.sheets["Sentiment Data"]
+                    img = OpenpyxlImage(temp_chart_path)
+                    ws.add_image(img, "H2")
+
+                if os.path.exists(temp_chart_path):
+                    os.remove(temp_chart_path)
+
+                messagebox.showinfo("Export Successful", f"Excel workbook with embedded charts saved:\n{file_path}")
+
+            else:
+                messagebox.showwarning("Unsupported Format", f"Unknown format '{ext}'. Please save as .pdf, .csv, or .xlsx")
+
+        except Exception as err:
+            messagebox.showerror("Export Error", f"Failed to export file:\n{err}")
 
     # --- UI & CHART UPDATES ---
     def update_ui(self):
@@ -361,12 +438,11 @@ class SentimentApp(tk.Tk):
         # Filter categories with data
         data_items = [(cat, val, palette[cat]) for cat, val in zip(categories, raw_vals) if val > 0]
 
-        # --- 1. CLEAN & BUG-FREE DONUT CHART ---
+        # --- 1. DONUT CHART ---
         if data_items and total > 0:
             labels, values, colors = zip(*data_items)
             explode = [0.02] * len(values) if len(values) > 1 else [0.0]
 
-            # Suppress direct wedge labels on slices < 5% to prevent overlap glitches
             def smart_autopct(pct):
                 return f"{pct:.1f}%" if pct >= 5.0 else ""
 
@@ -398,7 +474,7 @@ class SentimentApp(tk.Tk):
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="#f8fafc", edgecolor="#cbd5e1", linewidth=0.8)
             )
 
-            # Bottom Legend showing complete counts and percentages
+            # Bottom Legend
             legend_labels = [f"{label}: {val:,} ({val/total*100:.1f}%)" for label, val in zip(labels, values)]
             self.ax_pie.legend(
                 wedges, legend_labels, loc="lower center", bbox_to_anchor=(0.5, -0.16),
